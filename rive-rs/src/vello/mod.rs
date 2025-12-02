@@ -2,14 +2,13 @@ use std::{fmt, io::Cursor};
 
 use image::io::Reader;
 use smallvec::SmallVec;
-use vello::{
-    kurbo::{Affine, BezPath, Line, PathSeg, Point, Rect, Shape, Vec2},
-    peniko::{
-        self, BlendMode, Brush, BrushRef, Cap, Color, ColorStop, ColorStopsSource, Fill, Format,
-        Join, Mix, Stroke,
-    },
-    SceneBuilder, SceneFragment,
-};
+use vello::{kurbo::{Affine, BezPath, Line, PathSeg, Point, Rect, Shape, Vec2}, peniko::{
+    self, BlendMode, Brush, BrushRef, Color, ColorStop, ColorStopsSource, Fill,
+    Mix
+}, Scene};
+use vello::kurbo::{Cap, Join, Stroke};
+use vello::peniko::color::DynamicColor;
+use vello::peniko::{ColorStops, ImageBrush, ImageBrushRef};
 
 mod util;
 
@@ -18,7 +17,7 @@ use util::ScaleFromOrigin;
 use crate::renderer;
 
 fn to_vello_color(color: renderer::Color) -> Color {
-    Color::rgba8(color.r, color.g, color.b, color.a)
+    Color::from_rgba8(color.r, color.g, color.b, color.a)
 }
 
 fn to_vello_mix(blend_mode: renderer::BlendMode) -> Mix {
@@ -185,14 +184,14 @@ struct SliceStops<'s> {
 }
 
 impl ColorStopsSource for SliceStops<'_> {
-    fn collect_stops(&self, vec: &mut SmallVec<[ColorStop; 4]>) {
+    fn collect_stops(self, vec: &mut ColorStops) {
         vec.extend(
             self.colors
                 .iter()
                 .zip(self.stops.iter())
                 .map(|(&color, &offset)| ColorStop {
                     offset,
-                    color: to_vello_color(color),
+                    color: DynamicColor::from_alpha_color(to_vello_color(color)),
                 }),
         );
     }
@@ -242,7 +241,7 @@ impl renderer::Paint for Paint {
     fn set_thickness(&mut self, thickness: f32) {
         loop {
             if let RenderStyle::Stroke(stroke) = &mut self.style {
-                stroke.width = thickness;
+                stroke.width = thickness as _;
                 break;
             } else {
                 self.style = RenderStyle::Stroke(Stroke::new(0.0));
@@ -336,7 +335,7 @@ impl renderer::Gradient for Gradient {
 
 #[derive(Debug)]
 pub struct Image {
-    inner: peniko::Image,
+    inner: peniko::ImageData,
 }
 
 impl renderer::Image for Image {
@@ -351,25 +350,28 @@ impl renderer::Image for Image {
         let height = image.height();
 
         Some(Image {
-            inner: peniko::Image::new(image.into_raw().into(), Format::Rgba8, width, height),
+            inner: peniko::ImageData {
+                data: image.into_raw().into(), format: peniko::ImageFormat::Rgba8,
+                alpha_type: peniko::ImageAlphaType::Alpha,
+                width, height
+            },
         })
     }
 }
 
 pub struct Renderer {
-    scene: Box<SceneFragment>,
-    builder: SceneBuilder<'static>,
+    builder: Scene,
     transforms: Vec<Affine>,
     clips: Vec<bool>,
 }
 
 impl Renderer {
-    pub fn scene(&self) -> &SceneFragment {
-        &self.scene
+    pub fn scene(&self) -> &Scene {
+        &self.builder
     }
-
-    pub fn into_scene(self) -> SceneFragment {
-        *self.scene
+    
+    pub fn into_scene(self) -> Scene {
+        self.builder
     }
 
     fn last_transform(&mut self) -> &mut Affine {
@@ -379,24 +381,21 @@ impl Renderer {
     fn last_clip(&mut self) -> &mut bool {
         self.clips.last_mut().unwrap()
     }
-}
 
-impl Default for Renderer {
-    #[inline]
-    fn default() -> Self {
-        let mut scene = Box::<SceneFragment>::default();
-        let builder = {
-            let scene_mut: &mut SceneFragment = &mut scene;
-            SceneBuilder::for_fragment(unsafe {
-                // Quite a hack until we have a better way to do this in Vello.
-                // Pretend that the scene fragment pointer lives for 'static.
-                std::mem::transmute::<&mut SceneFragment, &'static mut SceneFragment>(scene_mut)
-            })
-        };
+    pub fn new(scene: Scene) -> Self {
+        // let mut scene = Box::<SceneFragment>::default();
+        // let builder = {
+        //     let scene_mut: &mut SceneFragment = &mut scene;
+        //     Scene::for_fragment(unsafe {
+        //         // Quite a hack until we have a better way to do this in Vello.
+        //         // Pretend that the scene fragment pointer lives for 'static.
+        //         std::mem::transmute::<&mut SceneFragment, &'static mut SceneFragment>(scene_mut)
+        //     })
+        // };
 
         Self {
-            scene,
-            builder,
+            // scene,
+            builder: scene,
             transforms: vec![Affine::IDENTITY],
             clips: vec![false],
         }
@@ -500,7 +499,10 @@ impl renderer::Renderer for Renderer {
             builder.push_layer(mix, opacity, transform, &rect);
         }
 
-        builder.draw_image(image, transform);
+        builder.draw_image(ImageBrush {
+            image,
+            sampler: Default::default(),
+        }, transform);
 
         if skip_blending {
             builder.pop_layer();
@@ -557,7 +559,10 @@ impl renderer::Renderer for Renderer {
             builder.fill(
                 Fill::NonZero,
                 transform,
-                BrushRef::Image(image),
+                BrushRef::Image(ImageBrush {
+                    image,
+                    sampler: Default::default(),
+                }),
                 Some(brush_transform),
                 &path,
             );
